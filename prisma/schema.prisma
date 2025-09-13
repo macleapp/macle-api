@@ -1,0 +1,238 @@
+// prisma/schema.prisma
+// ---------- Base ----------
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ---------- Enums ----------
+enum Role {
+  CUSTOMER
+  SELLER
+  PROVIDER
+}
+
+enum MediaType {
+  PHOTO
+  VIDEO
+}
+
+enum ReactionType {
+  LIKE // 👍 Me gusta
+  LOVE // ❤ Me encanta
+  WANT // 🤩 Lo quiero
+  RECOMMEND // 🙌 Recomendado
+  CLAP // 👏 Aplausos
+  CONFUSED // 🥴 No me convence
+}
+
+// ---------- Modelos ----------
+model User {
+  id                  Int     @id @default(autoincrement())
+  email               String  @unique
+  password            String
+  role                Role    @default(CUSTOMER)
+  name                String?
+  onboardingCompleted Boolean @default(false)
+
+  // Preferencias / Welcome
+  lang        String   @default("es")
+  tcAccepted  Boolean  @default(false)
+  tcVersion   String?
+
+  // Verificación por correo
+  emailVerified   Boolean   @default(false)
+  emailVerifiedAt DateTime?
+
+  // Verificación de cuenta (badge) SOLO tras pago
+  paidVerified   Boolean   @default(false)
+  paidVerifiedAt DateTime?
+
+  // Marca de tiempo
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relaciones
+  business            Business?
+  serviceProfile      ServiceProfile?
+  products            Product[]
+  media               Media[]
+  reactions           Reaction[]
+  reviewsAuthored     Review[]                 @relation("reviews_authored")
+  reviewsReceived     Review[]                 @relation("reviews_received")
+  followers           Follow[]                 @relation("followedBy")
+  following           Follow[]                 @relation("follows")
+  refreshTokens       RefreshToken[]
+  emailTokens         EmailVerificationToken[]
+  favoriteProducts    FavoriteProduct[]
+  passwordResetTokens PasswordResetToken[]
+
+  @@index([email])
+}
+
+model Business {
+  id    Int     @id @default(autoincrement())
+  name  String
+  phone String?
+  city  String?
+
+  ownerId Int  @unique
+  owner   User @relation(fields: [ownerId], references: [id])
+}
+
+model ServiceProfile {
+  id    Int     @id @default(autoincrement())
+  name  String
+  phone String?
+  city  String?
+
+  ownerId Int  @unique
+  owner   User @relation(fields: [ownerId], references: [id])
+}
+
+model Product {
+  id          Int      @id @default(autoincrement())
+  name        String
+  price       Float
+  description String?
+  sellerId    Int
+  seller      User     @relation(fields: [sellerId], references: [id])
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  reactions Reaction[]
+  favoredBy FavoriteProduct[]
+
+  @@index([sellerId])
+  @@index([createdAt])
+}
+
+model Media {
+  id        Int       @id @default(autoincrement())
+  type      MediaType
+  url       String
+  ownerId   Int
+  owner     User      @relation(fields: [ownerId], references: [id])
+  caption   String?
+  createdAt DateTime  @default(now())
+
+  reactions Reaction[]
+
+  @@index([ownerId])
+  @@index([createdAt])
+}
+
+model Reaction {
+  id        Int          @id @default(autoincrement())
+  type      ReactionType
+  userId    Int
+  user      User         @relation(fields: [userId], references: [id])
+  mediaId   Int?
+  media     Media?       @relation(fields: [mediaId], references: [id])
+  productId Int?
+  product   Product?     @relation(fields: [productId], references: [id])
+  createdAt DateTime     @default(now())
+
+  @@index([userId])
+  @@index([mediaId])
+  @@index([productId])
+}
+
+model Review {
+  id        Int      @id @default(autoincrement())
+  rating    Int
+  comment   String?
+  authorId  Int
+  author    User     @relation("reviews_authored", fields: [authorId], references: [id])
+  sellerId  Int
+  seller    User     @relation("reviews_received", fields: [sellerId], references: [id])
+  createdAt DateTime @default(now())
+
+  @@index([authorId])
+  @@index([sellerId])
+}
+
+model Follow {
+  followerId  Int
+  followingId Int
+  createdAt   DateTime @default(now())
+
+  follower  User @relation("follows", fields: [followerId], references: [id])
+  following User @relation("followedBy", fields: [followingId], references: [id])
+
+  @@id([followerId, followingId])
+  @@index([followingId])
+}
+
+model FavoriteProduct {
+  userId    Int
+  productId Int
+  createdAt DateTime @default(now())
+
+  user    User    @relation(fields: [userId], references: [id])
+  product Product @relation(fields: [productId], references: [id])
+
+  @@id([userId, productId])
+  @@index([productId])
+}
+
+model RefreshToken {
+  id            Int       @id @default(autoincrement())
+  userId        Int
+  jti           String    @unique
+  revokedAt     DateTime?
+  replacedByJti String?
+  createdAt     DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+}
+
+model EmailVerificationToken {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([token])
+}
+
+model PasswordResetToken {
+  id        Int       @id @default(autoincrement())
+  userId    Int
+  token     String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([token])
+}
+
+enum ChatSender {
+  me
+  seller
+}
+
+model ChatMessage {
+  id        String     @id @default(cuid())
+  sellerId  Int
+  userId    String?    // si quieres asociar al usuario logueado
+  from      ChatSender
+  text      String
+  createdAt DateTime   @default(now())
+
+  @@index([sellerId, createdAt])
+}
