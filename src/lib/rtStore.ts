@@ -1,6 +1,6 @@
 // src/lib/rtStore.ts
-import prisma from "./prisma";
 import { Prisma } from "@prisma/client";
+import { prisma } from '../lib/prisma';
 
 /** Guarda el jti del refresh recién emitido (idempotente ante duplicados) */
 export async function saveRefreshJti(userId: number, jti: string) {

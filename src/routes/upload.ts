@@ -4,6 +4,7 @@ import fs from "fs";
 import multer, { MulterError } from "multer";
 import { authMW } from "../lib/authMW";
 import { ENV } from "../config/env";
+import prisma  from '../lib/prisma';
 
 const router = Router();
 
