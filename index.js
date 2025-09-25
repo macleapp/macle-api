@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
+import fetch from 'node-fetch'; // para llamar a la API de FCM
 
 const app = express();
 app.use(cors());
@@ -28,7 +29,10 @@ const services = [
   { id: 's6', name: 'Lavado + Brushing', price: 20, imageUrl: 'https://picsum.photos/seed/s6/600/400' }
 ];
 
-// ====== ENDPOINTS ======
+// ====== BASE DE DATOS EN MEMORIA ======
+const devices = []; // aquí se guardarán los tokens de FCM
+
+// ====== ENDPOINTS MOCKS ======
 app.get('/products', (req, res) => {
   const limit = Number(req.query.limit) || products.length;
   return res.json(products.slice(0, limit));
@@ -51,7 +55,47 @@ app.get('/services/:id', (req, res) => {
   return res.json(item);
 });
 
-// Salud
+// ====== PUSH NOTIFICATIONS ======
+
+// Registrar un token de dispositivo
+app.post('/devices/register', (req, res) => {
+  const { token, platform } = req.body;
+  if (!token) return res.status(400).json({ message: 'Token requerido' });
+
+  if (!devices.find(d => d.token === token)) {
+    devices.push({ token, platform });
+  }
+
+  return res.json({ success: true });
+});
+
+// Enviar notificación de prueba a todos los dispositivos
+app.post('/notifications/test', async (req, res) => {
+  const { title, body } = req.body;
+  if (!process.env.FCM_SERVER_KEY) {
+    return res.status(500).json({ message: 'Falta FCM_SERVER_KEY en .env' });
+  }
+
+  const promises = devices.map(d =>
+    fetch('https://fcm.googleapis.com/fcm/send', {
+      method: 'POST',
+      headers: {
+        Authorization: `key=${process.env.FCM_SERVER_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        to: d.token,
+        notification: { title, body },
+        data: { route: 'Home' }
+      })
+    })
+  );
+
+  await Promise.all(promises);
+  return res.json({ success: true, sent: devices.length });
+});
+
+// ====== Salud ======
 app.get('/', (_, res) => res.send('OK macle-api'));
 
 const PORT = process.env.PORT || 3000;

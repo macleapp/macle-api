@@ -18,6 +18,7 @@ import uploadRouter from './routes/upload';
 import chatRoutes from './routes/chat';
 import toolsRoutes from './routes/tools';
 import welcomeRouter from "./routes/welcome";
+import notificationsRouter from "./routes/notifications"
 
 // 👉 cuando me envíes el archivo, descomento:
 // import welcomeRouter from './routes/welcome';
@@ -37,6 +38,7 @@ app.use(
 );
 app.use(cookieParser());
 app.use(compression());
+app.use("/notifications",notificationsRouter)
 
 /* ---------- CORS ---------- */
 const allowList = Array.isArray(ENV.CORS_ORIGIN)

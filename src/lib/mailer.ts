@@ -1,82 +1,31 @@
-import nodemailer from "nodemailer";
-import { ENV } from "../config/env";
+// src/lib/mailer.ts
+// Genera enlaces de verificación / reset usando Firebase Admin.
+// NOTA: Firebase Admin **no envía** el correo automáticamente;
+// solo devuelve el link. Tú decides cómo enviarlo (o solo devolverlo al cliente).
 
-const transporter = nodemailer.createTransport({
-  host: ENV.SMTP_HOST,
-  port: ENV.SMTP_PORT,
-  secure: ENV.SMTP_SECURE, // false -> 587 STARTTLS; true -> 465 SSL
-  auth: {
-    user: ENV.SMTP_USER,
-    pass: ENV.SMTP_PASS,
-  },
-  // Endurecer un poco sin romper certificados válidos
-  tls: {
-    minVersion: "TLSv1.2",
-  },
-  // timeouts razonables
-  connectionTimeout: 20_000,
-  greetingTimeout: 20_000,
-  socketTimeout: 20_000,
-});
+import { auth as adminAuth } from "./firebase"; // Asegúrate de que "./firebase" inicializa firebase-admin
 
-function appUrl(path: string, token: string) {
-  const trimmed = path.endsWith("/")
-    ? path.slice(0, -1)
-    : path;
-  const sep = trimmed.includes("/:") ? "" : "/"; // si usas /:token, ya incluirá la barra
-  return `${ENV.APP_PUBLIC_URL}${trimmed}${sep}${encodeURIComponent(token)}`;
+// Opcional: configura la URL a donde quieres que redirija el link
+function actionCodeSettings() {
+  // Puedes ajustar estos valores o leerlos de variables de entorno
+  const url = process.env.APP_PUBLIC_VERIFY_REDIRECT_URL; // p.ej. https://tu-app.com/after-verify
+  return url ? { url } : undefined;
 }
 
-/** Email de verificación */
-export async function sendVerificationEmail(to: string, token: string) {
-  const verifyUrl = appUrl(ENV.EMAIL_VERIFY_ROUTE, token);
-
-  await transporter.sendMail({
-    from: ENV.EMAIL_FROM,
-    to,
-    subject: `${ENV.APP_NAME} – Verifica tu correo`,
-    html: `
-      <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;line-height:1.5">
-        <h2>${ENV.APP_NAME}</h2>
-        <p>Gracias por registrarte. Para activar tu cuenta, verifica tu correo haciendo clic en el botón:</p>
-        <p style="margin:16px 0">
-          <a href="${verifyUrl}"
-             style="display:inline-block;background:#06b6d4;color:#fff;padding:10px 16px;border-radius:8px;text-decoration:none">
-            Verificar correo
-          </a>
-        </p>
-        <p>O copia y pega este enlace en tu navegador:</p>
-        <p><a href="${verifyUrl}">${verifyUrl}</a></p>
-        <hr/>
-        <small>Si no creaste esta cuenta, ignora este mensaje.</small>
-      </div>
-    `,
-  });
+/**
+ * Genera el enlace de verificación de email en Firebase.
+ * Firma compatible: si tu controller aún pasa (email, token), el token se ignora.
+ */
+export async function sendVerificationEmail(email: string, _legacyToken?: string): Promise<string> {
+  const link = await adminAuth.generateEmailVerificationLink(email, actionCodeSettings());
+  // Aquí NO se envía correo; solo devolvemos el link.
+  return link;
 }
 
-/** Email de restablecimiento de contraseña */
-export async function sendPasswordResetEmail(to: string, token: string) {
-  const resetUrl = appUrl(ENV.PASSWORD_RESET_ROUTE, token);
-
-  await transporter.sendMail({
-    from: ENV.EMAIL_FROM,
-    to,
-    subject: `${ENV.APP_NAME} – Restablece tu contraseña`,
-    html: `
-      <div style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;line-height:1.5">
-        <h2>${ENV.APP_NAME}</h2>
-        <p>Solicitaste restablecer tu contraseña. Abre el siguiente enlace para continuar:</p>
-        <p style="margin:16px 0">
-          <a href="${resetUrl}"
-             style="display:inline-block;background:#0ea5e9;color:#fff;padding:10px 16px;border-radius:8px;text-decoration:none">
-            Restablecer contraseña
-          </a>
-        </p>
-        <p>O copia y pega este enlace en tu navegador:</p>
-        <p><a href="${resetUrl}">${resetUrl}</a></p>
-        <hr/>
-        <small>Si no fuiste tú, puedes ignorar este correo.</small>
-      </div>
-    `,
-  });
+/**
+ * Genera el enlace de restablecimiento de contraseña en Firebase.
+ */
+export async function sendPasswordResetEmail(email: string): Promise<string> {
+  const link = await adminAuth.generatePasswordResetLink(email, actionCodeSettings());
+  return link;
 }

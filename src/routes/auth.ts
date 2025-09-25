@@ -30,6 +30,7 @@ const registerSchema = z.object({
     email: z.string().email(),
     password: z.string().min(8, "Mínimo 8 caracteres"),
     role: z.enum(["CUSTOMER", "SELLER", "PROVIDER"]).optional(),
+    accepted: z.boolean(), // ✅ Obligatorio aceptar
   }),
 });
 
@@ -71,14 +72,24 @@ function readJwtPayload<T = any>(jwt: string): T {
 /* ========== REGISTER ========== */
 router.post("/register", validate(registerSchema), async (req, res) => {
   try {
-    const { email, password, role, name } = req.body as {
+    const { email, password, role, name, accepted } = req.body as {
       email: string;
       password: string;
       role?: Role;
       name: string;
+      accepted: boolean;
     };
 
-    const exists = await prisma.user.findUnique({ where: { email } });
+    if (!accepted) {
+      return res.status(400).json({
+        ok: false,
+        msg: "Debes aceptar los Términos y la Política de Privacidad.",
+      });
+    }
+
+    const em = email.toLowerCase().trim();
+
+    const exists = await prisma.user.findUnique({ where: { email: em } });
     if (exists) return res.status(400).json({ ok: false, msg: "Email ya registrado" });
 
     const hash = await bcrypt.hash(password, 10);
@@ -86,10 +97,14 @@ router.post("/register", validate(registerSchema), async (req, res) => {
     const user = await prisma.user.create({
       data: {
         name,
-        email,
+        email: em,
         password: hash,
         role: role ?? "CUSTOMER",
         emailVerified: false,
+        // ✅ Guardamos aceptación legal real del usuario
+        tcAccepted: accepted,
+        tcVersion: "v1",
+        legalAcceptedAt: new Date(),
       },
       include: { business: true },
     });
@@ -98,7 +113,7 @@ router.post("/register", validate(registerSchema), async (req, res) => {
     const emailToken = generateEmailToken(user.id, user.email);
     await sendVerificationEmail(user.email, emailToken);
 
-    // emite tokens (opcional para onboarding)
+    // Tokens
     const { accessToken, refreshToken } = issueTokens(user.id);
     const { jti } = readJwtPayload<{ jti: string }>(refreshToken);
     await saveRefreshJti(user.id, jti);
@@ -117,14 +132,19 @@ router.post("/register", validate(registerSchema), async (req, res) => {
 });
 
 /* ========== VERIFY EMAIL ========== */
-// acepta /auth/verify-email/:token  (mejor DX para enlaces en correos)
-router.get("/verify-email/:token", async (req, res) => {
+/** Acepta path param o query: /auth/verify-email/:token  o  /auth/verify-email?token=... */
+router.get("/verify-email/:token?", async (req, res) => {
   try {
-    const payload = verifyEmailToken(req.params.token);
+    const token = (req.params.token || req.query.token || "").toString();
+    if (!token) return res.status(400).json({ ok: false, msg: "Falta token" });
+
+    const payload = verifyEmailToken(token);
     if (!payload?.email) return res.status(400).json({ ok: false, msg: "Token inválido" });
 
+    const em = payload.email.toLowerCase().trim();
+
     await prisma.user.update({
-      where: { email: payload.email },
+      where: { email: em },
       data: { emailVerified: true, emailVerifiedAt: new Date() },
     });
 
@@ -137,8 +157,10 @@ router.get("/verify-email/:token", async (req, res) => {
 /* ========== RESEND VERIFICATION ========== */
 router.post("/resend-verification", async (req, res) => {
   try {
-    const email = (req.body?.email || "").toString().toLowerCase();
-    const user = await prisma.user.findUnique({ where: { email } });
+    const em = (req.body?.email || "").toString().toLowerCase().trim();
+    if (!em) return res.status(400).json({ ok: false, msg: "Falta email" });
+
+    const user = await prisma.user.findUnique({ where: { email: em } });
     if (!user) return res.status(400).json({ ok: false, msg: "Usuario no encontrado" });
     if (user.emailVerified) return res.status(400).json({ ok: false, msg: "El correo ya está verificado" });
 
@@ -155,9 +177,10 @@ router.post("/resend-verification", async (req, res) => {
 router.post("/login", validate(loginSchema), async (req, res) => {
   try {
     const { email, password } = req.body as { email: string; password: string };
+    const em = email.toLowerCase().trim();
 
     const user = await prisma.user.findUnique({
-      where: { email },
+      where: { email: em },
       include: { business: true },
     });
     if (!user) return res.status(400).json({ ok: false, msg: "Credenciales" });
@@ -217,9 +240,9 @@ router.post("/refresh", validate(refreshSchema), async (req, res) => {
 });
 
 /* ========== LOGOUT-ALL ========== */
-router.post("/logout-all", authMW, async (req, res) => {
+router.post("/logout-all", authMW, async (_req, res) => {
   try {
-    await revokeAllUserTokens(req.userId!);
+    await revokeAllUserTokens(_req.userId!);
     return res.json({ ok: true, msg: "Sesiones cerradas en todos los dispositivos" });
   } catch (e: any) {
     return res.status(500).json({ ok: false, msg: e.message });
@@ -235,36 +258,41 @@ router.post("/google", async (req, res) => {
     const payload = await verifyGoogleToken(idToken);
     if (!payload?.email) return res.status(400).json({ ok: false, msg: "Token inválido" });
 
-    let user = await prisma.user.findUnique({ where: { email: payload.email } });
+    const em = payload.email.toLowerCase().trim();
+
+    let user = await prisma.user.findUnique({ where: { email: em } });
     if (!user) {
       user = await prisma.user.create({
         data: {
-          email: payload.email,
+          email: em,
           password: "",
           role: "CUSTOMER",
           name: payload.name ?? null,
-          emailVerified: true, // confiamos en Google
+          emailVerified: true, // Confiamos en Google
+          tcAccepted: true,    // Aceptación por federado
+          tcVersion: "v1",
+          legalAcceptedAt: new Date(),
         },
       });
     }
 
     const { accessToken, refreshToken } = issueTokens(user.id);
-    res.json({ ok: true, accessToken, refreshToken, user });
+    return res.json({ ok: true, accessToken, refreshToken, user });
   } catch (e: any) {
-    res.status(401).json({ ok: false, msg: e.message });
+    return res.status(401).json({ ok: false, msg: e.message });
   }
 });
 
 /* ========== FORGOT PASSWORD ========== */
 router.post("/forgot-password", validate(forgotSchema), async (req, res) => {
   try {
-    const { email } = req.body as { email: string };
-    const user = await prisma.user.findUnique({ where: { email } });
+    const em = (req.body.email as string).toLowerCase().trim();
+    const user = await prisma.user.findUnique({ where: { email: em } });
 
-    // siempre respondemos ok para no filtrar correos
+    // Respuesta genérica para no filtrar correos
     if (!user) return res.json({ ok: true, msg: "Si el correo existe, enviaremos instrucciones." });
 
-    // invalidar tokens anteriores
+    // Invalida tokens previos
     await prisma.passwordResetToken.updateMany({
       where: { userId: user.id, usedAt: null },
       data: { usedAt: new Date() },

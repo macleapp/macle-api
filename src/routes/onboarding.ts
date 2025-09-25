@@ -1,5 +1,5 @@
 // src/routes/onboarding.ts
-import { Router } from "express";
+import { Router, Request, Response, NextFunction } from "express";
 import prisma from "../lib/prisma";
 import { authMW } from "../lib/authMW";
 import { Role } from "@prisma/client";
@@ -26,13 +26,13 @@ const providerSchema = z.object({
 
 /* ========= Helpers ========= */
 function validate<T extends z.ZodTypeAny>(schema: T) {
-  return (req: any, res: any, next: any) => {
+  return (req: Request, res: Response, next: NextFunction) => {
     const parsed = schema.safeParse({ body: req.body });
     if (!parsed.success) {
       const msg = parsed.error.issues.map(e => e.message).join(", ");
       return res.status(400).json({ ok: false, msg });
     }
-    // normaliza valores con trim y vacíos -> null
+    // Normaliza strings vacíos -> null
     req.body = Object.fromEntries(
       Object.entries(req.body).map(([k, v]) =>
         typeof v === "string" ? [k, v.trim() || null] : [k, v]
@@ -43,9 +43,9 @@ function validate<T extends z.ZodTypeAny>(schema: T) {
 }
 
 /* ========= SELLER ========= */
-router.post("/seller", authMW, validate(sellerSchema), async (req, res) => {
+router.post("/seller", authMW, validate(sellerSchema), async (req: Request, res: Response) => {
   try {
-    const id = Number(req.userId);
+    const id = Number((req as any).userId);
     if (!id) return res.status(401).json({ ok: false, msg: "Unauthorized" });
 
     const { businessName, phone, city } = req.body as {
@@ -61,24 +61,24 @@ router.post("/seller", authMW, validate(sellerSchema), async (req, res) => {
         onboardingCompleted: true,
         business: {
           upsert: {
-            create: { name: businessName, phone, city },
-            update: { name: businessName, phone, city },
+            create: { name: businessName.trim(), phone, city },
+            update: { name: businessName.trim(), phone, city },
           },
         },
       },
       include: { business: true },
     });
 
-    res.json({ ok: true, user });
+    return res.json({ ok: true, user });
   } catch (e: any) {
-    res.status(400).json({ ok: false, msg: e.message ?? "Error" });
+    return res.status(400).json({ ok: false, msg: e.message ?? "Error" });
   }
 });
 
 /* ========= PROVIDER ========= */
-router.post("/provider", authMW, validate(providerSchema), async (req, res) => {
+router.post("/provider", authMW, validate(providerSchema), async (req: Request, res: Response) => {
   try {
-    const id = Number(req.userId);
+    const id = Number((req as any).userId);
     if (!id) return res.status(401).json({ ok: false, msg: "Unauthorized" });
 
     const { name, phone, city } = req.body as {
@@ -94,17 +94,17 @@ router.post("/provider", authMW, validate(providerSchema), async (req, res) => {
         onboardingCompleted: true,
         serviceProfile: {
           upsert: {
-            create: { name, phone, city },
-            update: { name, phone, city },
+            create: { name: name.trim(), phone, city },
+            update: { name: name.trim(), phone, city },
           },
         },
       },
       include: { serviceProfile: true },
     });
 
-    res.json({ ok: true, user });
+    return res.json({ ok: true, user });
   } catch (e: any) {
-    res.status(400).json({ ok: false, msg: e.message ?? "Error" });
+    return res.status(400).json({ ok: false, msg: e.message ?? "Error" });
   }
 });
 

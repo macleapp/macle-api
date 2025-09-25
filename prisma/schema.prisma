@@ -22,39 +22,62 @@ enum MediaType {
 }
 
 enum ReactionType {
-  LIKE // 👍 Me gusta
-  LOVE // ❤ Me encanta
-  WANT // 🤩 Lo quiero
-  RECOMMEND // 🙌 Recomendado
-  CLAP // 👏 Aplausos
-  CONFUSED // 🥴 No me convence
+  LIKE       // 👍 Me gusta
+  LOVE       // ❤ Me encanta
+  WANT       // 🤩 Lo quiero
+  RECOMMEND  // 🙌 Recomendado
+  CLAP       // 👏 Aplausos
+  CONFUSED   // 🥴 No me convence
+}
+
+enum ChatSender {
+  me
+  seller
+}
+
+/* === Badges === */
+enum BadgeCode {
+  real_photo
+  real_name
+  kindness
+  on_time
+  top_recommended
+}
+
+enum BadgeIcon {
+  user_check   // Feather: user-check
+  id_card      // MaterialCommunityIcons: id-card
+  smile        // Feather: smile
+  clock        // Feather: clock
+  award        // Feather: award
 }
 
 // ---------- Modelos ----------
 model User {
-  id                  Int     @id @default(autoincrement())
-  email               String  @unique
+  id                  Int      @id @default(autoincrement())
+  email               String   @unique
   password            String
-  role                Role    @default(CUSTOMER)
+  role                Role     @default(CUSTOMER)
   name                String?
-  onboardingCompleted Boolean @default(false)
+  onboardingCompleted Boolean  @default(false)
 
   // Preferencias / Welcome
-  lang        String   @default("es")
-  tcAccepted  Boolean  @default(false)
-  tcVersion   String?
+  lang             String   @default("es")
+  tcAccepted       Boolean  @default(false)
+  tcVersion        String?
+  legalAcceptedAt  DateTime?
 
   // Verificación por correo
-  emailVerified   Boolean   @default(false)
-  emailVerifiedAt DateTime?
+  emailVerified    Boolean   @default(false)
+  emailVerifiedAt  DateTime?
 
   // Verificación de cuenta (badge) SOLO tras pago
-  paidVerified   Boolean   @default(false)
-  paidVerifiedAt DateTime?
+  paidVerified     Boolean   @default(false)
+  paidVerifiedAt   DateTime?
 
   // Marca de tiempo
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
 
   // Relaciones
   business            Business?
@@ -71,6 +94,9 @@ model User {
   favoriteProducts    FavoriteProduct[]
   passwordResetTokens PasswordResetToken[]
 
+  // Badges
+  sellerBadges      SellerBadge[]
+
   @@index([email])
 }
 
@@ -82,6 +108,18 @@ model Business {
 
   ownerId Int  @unique
   owner   User @relation(fields: [ownerId], references: [id])
+
+  // Métricas/flags para reglas de insignias
+  hasRealPhoto       Boolean?  @default(false)
+  realNameVerified   Boolean?  @default(false)
+  ratingAvg          Float?
+  responseRate       Float?    // 0..100
+  responseTimeMs     Int?      // milisegundos
+  onTimeRate         Float?    // 0..100
+  categoryPercentile Float?    // 0 (mejor) .. 100
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model ServiceProfile {
@@ -92,6 +130,9 @@ model ServiceProfile {
 
   ownerId Int  @unique
   owner   User @relation(fields: [ownerId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 model Product {
@@ -104,8 +145,8 @@ model Product {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  reactions Reaction[]
-  favoredBy FavoriteProduct[]
+  reactions   Reaction[]
+  favoredBy   FavoriteProduct[]
 
   @@index([sellerId])
   @@index([createdAt])
@@ -221,18 +262,40 @@ model PasswordResetToken {
   @@index([token])
 }
 
-enum ChatSender {
-  me
-  seller
-}
-
 model ChatMessage {
   id        String     @id @default(cuid())
   sellerId  Int
-  userId    String?    // si quieres asociar al usuario logueado
+  userId    String?
   from      ChatSender
   text      String
   createdAt DateTime   @default(now())
 
   @@index([sellerId, createdAt])
+}
+
+/* === Badges === */
+model Badge {
+  id          Int        @id @default(autoincrement())
+  code        BadgeCode  @unique
+  label       String
+  description String
+  icon        BadgeIcon
+
+  sellers     SellerBadge[]
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+}
+
+model SellerBadge {
+  id        Int      @id @default(autoincrement())
+  ownerId   Int
+  badgeId   Int
+  earnedAt  DateTime @default(now())
+
+  owner   User  @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  badge   Badge @relation(fields: [badgeId], references: [id], onDelete: Cascade)
+
+  @@unique([ownerId, badgeId])
+  @@index([ownerId])
+  @@index([badgeId])
 }
