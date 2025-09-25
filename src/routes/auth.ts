@@ -16,7 +16,6 @@ import {
 } from "../lib/rtStore";
 import { validate } from "../lib/validate";
 import { verifyGoogleToken } from "../lib/google";
-import { generateEmailToken, verifyEmailToken } from "../lib/emailTokens";
 import { sendVerificationEmail, sendPasswordResetEmail } from "../lib/mailer";
 
 const router = Router();
@@ -30,7 +29,7 @@ const registerSchema = z.object({
     email: z.string().email(),
     password: z.string().min(8, "Mínimo 8 caracteres"),
     role: z.enum(["CUSTOMER", "SELLER", "PROVIDER"]).optional(),
-    accepted: z.boolean(), // ✅ Obligatorio aceptar
+    accepted: z.boolean(),
   }),
 });
 
@@ -101,7 +100,6 @@ router.post("/register", validate(registerSchema), async (req, res) => {
         password: hash,
         role: role ?? "CUSTOMER",
         emailVerified: false,
-        // ✅ Guardamos aceptación legal real del usuario
         tcAccepted: accepted,
         tcVersion: "v1",
         legalAcceptedAt: new Date(),
@@ -109,9 +107,8 @@ router.post("/register", validate(registerSchema), async (req, res) => {
       include: { business: true },
     });
 
-    // Verificación por email
-    const emailToken = generateEmailToken(user.id, user.email);
-    await sendVerificationEmail(user.email, emailToken);
+    // Envío de verificación (Firebase genera y envía/retorna el link según tu mailer)
+    await sendVerificationEmail(user.email);
 
     // Tokens
     const { accessToken, refreshToken } = issueTokens(user.id);
@@ -127,32 +124,16 @@ router.post("/register", validate(registerSchema), async (req, res) => {
     });
   } catch (e: any) {
     console.error("REGISTER_ERROR:", e?.issues || e?.message || e);
-    return res.status(400).json({ ok: false, msg: e?.message || "Bad request", issues: e?.issues });
+    return res
+      .status(400)
+      .json({ ok: false, msg: e?.message || "Bad request", issues: e?.issues });
   }
 });
 
-/* ========== VERIFY EMAIL ========== */
-/** Acepta path param o query: /auth/verify-email/:token  o  /auth/verify-email?token=... */
-router.get("/verify-email/:token?", async (req, res) => {
-  try {
-    const token = (req.params.token || req.query.token || "").toString();
-    if (!token) return res.status(400).json({ ok: false, msg: "Falta token" });
-
-    const payload = verifyEmailToken(token);
-    if (!payload?.email) return res.status(400).json({ ok: false, msg: "Token inválido" });
-
-    const em = payload.email.toLowerCase().trim();
-
-    await prisma.user.update({
-      where: { email: em },
-      data: { emailVerified: true, emailVerifiedAt: new Date() },
-    });
-
-    return res.json({ ok: true, msg: "Email verificado con éxito" });
-  } catch {
-    return res.status(400).json({ ok: false, msg: "Token inválido o expirado" });
-  }
-});
+/* ========== (REMOVIDO) VERIFY EMAIL POR TOKEN PROPIO ==========
+   Si sigues el flujo de Firebase, no necesitas esta ruta.
+   Si en el futuro la necesitas, vuelve a implementarla.
+*/
 
 /* ========== RESEND VERIFICATION ========== */
 router.post("/resend-verification", async (req, res) => {
@@ -162,10 +143,10 @@ router.post("/resend-verification", async (req, res) => {
 
     const user = await prisma.user.findUnique({ where: { email: em } });
     if (!user) return res.status(400).json({ ok: false, msg: "Usuario no encontrado" });
-    if (user.emailVerified) return res.status(400).json({ ok: false, msg: "El correo ya está verificado" });
+    if (user.emailVerified)
+      return res.status(400).json({ ok: false, msg: "El correo ya está verificado" });
 
-    const token = generateEmailToken(user.id, user.email);
-    await sendVerificationEmail(user.email, token);
+    await sendVerificationEmail(user.email);
 
     return res.json({ ok: true, msg: "Se envió un nuevo correo de verificación." });
   } catch (e: any) {
@@ -186,7 +167,9 @@ router.post("/login", validate(loginSchema), async (req, res) => {
     if (!user) return res.status(400).json({ ok: false, msg: "Credenciales" });
 
     if (!user.emailVerified)
-      return res.status(403).json({ ok: false, msg: "Verifica tu email antes de iniciar sesión" });
+      return res
+        .status(403)
+        .json({ ok: false, msg: "Verifica tu email antes de iniciar sesión" });
 
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) return res.status(400).json({ ok: false, msg: "Credenciales" });
@@ -240,9 +223,9 @@ router.post("/refresh", validate(refreshSchema), async (req, res) => {
 });
 
 /* ========== LOGOUT-ALL ========== */
-router.post("/logout-all", authMW, async (_req, res) => {
+router.post("/logout-all", authMW, async (req, res) => {
   try {
-    await revokeAllUserTokens(_req.userId!);
+    await revokeAllUserTokens(req.userId!);
     return res.json({ ok: true, msg: "Sesiones cerradas en todos los dispositivos" });
   } catch (e: any) {
     return res.status(500).json({ ok: false, msg: e.message });
@@ -269,7 +252,7 @@ router.post("/google", async (req, res) => {
           role: "CUSTOMER",
           name: payload.name ?? null,
           emailVerified: true, // Confiamos en Google
-          tcAccepted: true,    // Aceptación por federado
+          tcAccepted: true,
           tcVersion: "v1",
           legalAcceptedAt: new Date(),
         },
@@ -292,20 +275,22 @@ router.post("/forgot-password", validate(forgotSchema), async (req, res) => {
     // Respuesta genérica para no filtrar correos
     if (!user) return res.json({ ok: true, msg: "Si el correo existe, enviaremos instrucciones." });
 
-    // Invalida tokens previos
+    // Invalida tokens previos (si conservas tu tabla local)
     await prisma.passwordResetToken.updateMany({
       where: { userId: user.id, usedAt: null },
       data: { usedAt: new Date() },
     });
 
+    // Puedes mantener este registro (auditoría) aunque uses link de Firebase
     const token = randomBytes(32).toString("hex");
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 60min
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 60 min
 
     await prisma.passwordResetToken.create({
       data: { userId: user.id, token, expiresAt },
     });
 
-    await sendPasswordResetEmail(user.email, token);
+    // Genera y envía (o devuelve) el enlace de Firebase
+    await sendPasswordResetEmail(user.email);
 
     return res.json({ ok: true, msg: "Si el correo existe, enviaremos instrucciones." });
   } catch (e: any) {

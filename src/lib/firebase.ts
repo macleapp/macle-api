@@ -1,13 +1,10 @@
-// src/lib/firebase.ts
 import admin from "firebase-admin";
 
 /**
  * Inicializa Firebase Admin una sola vez.
- * Soporta dos formas de credenciales:
- * 1) Variable de entorno FIREBASE_SERVICE_ACCOUNT_JSON con el JSON del service account (stringificado).
- * 2) GOOGLE_APPLICATION_CREDENTIALS apuntando a un archivo .json (applicationDefault()).
- *
- * Opcional: puedes forzar el projectId con FIREBASE_PROJECT_ID.
+ * Usa:
+ * - FIREBASE_SERVICE_ACCOUNT_JSON (contenido del JSON como string) o
+ * - GOOGLE_APPLICATION_CREDENTIALS apuntando a un archivo .json.
  */
 
 function parseServiceAccountFromEnv():
@@ -17,17 +14,12 @@ function parseServiceAccountFromEnv():
   if (!raw) return undefined;
 
   try {
-    // Puede venir ya como JSON o escapado
     return JSON.parse(raw);
   } catch {
-    // Si está doblemente escapado, intenta una segunda pasada
     try {
       return JSON.parse(JSON.parse(raw));
     } catch (err) {
-      console.warn(
-        "[firebase] No se pudo parsear FIREBASE_SERVICE_ACCOUNT_JSON:",
-        err
-      );
+      console.warn("[firebase] No se pudo parsear FIREBASE_SERVICE_ACCOUNT_JSON:", err);
       return undefined;
     }
   }
@@ -40,11 +32,9 @@ if (!admin.apps.length) {
   if (svc) {
     admin.initializeApp({
       credential: admin.credential.cert(svc),
-      projectId, // opcional (usará el del JSON si no lo pasas)
+      projectId,
     });
   } else {
-    // Usará GOOGLE_APPLICATION_CREDENTIALS si está definida,
-    // o credenciales del entorno (p.ej. en Cloud Run / GCP).
     admin.initializeApp({
       credential: admin.credential.applicationDefault(),
       projectId,
@@ -58,7 +48,7 @@ if (!admin.apps.length) {
   );
 }
 
-// Exporta los servicios que usarás en el resto del backend
+// Exporta servicios
 export const auth = admin.auth();
 export const messaging = admin.messaging();
 export const firestore = admin.firestore();

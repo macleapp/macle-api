@@ -104,7 +104,7 @@ export const AuthService = {
       data: { userId: user.id, token, expiresAt: expires },
     });
 
-    await sendVerificationEmail(user.email, token);
+    await sendVerificationEmail(user.email);
 
     // crear registro de refresh token (para revocación por jti si lo necesitas)
     const jti = randomBytes(16).toString("hex");
@@ -181,7 +181,7 @@ export const AuthService = {
       data: { userId: user.id, token, expiresAt: expires },
     });
 
-    await sendVerificationEmail(user.email, token);
+    await sendVerificationEmail(user.email);
 
     return { sent: true as const };
   },
