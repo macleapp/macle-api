@@ -1,15 +1,15 @@
 // src/modules/auth/auth.service.ts
 import { Role } from "@prisma/client";
 import bcrypt from "bcryptjs";
-import jwt, { SignOptions } from "jsonwebtoken";
 import { randomBytes } from "crypto";
+import jwt, { SignOptions } from "jsonwebtoken";
+
 import prisma from "../../lib/prisma";
 import { ENV } from "../../config/env";
-import { sendVerificationEmail } from "../../lib/mailer";
+import { sendVerificationEmail, sendPasswordResetEmail } from "../../lib/mailer";
+import { auth as fbAuth } from "../../lib/firebase";
 
-/* =========================
-   Tipos y utilidades
-   ========================= */
+/* ===== Tipos ===== */
 export type PublicUser = {
   id: number;
   email: string;
@@ -34,56 +34,70 @@ function toPublicUser(u: any): PublicUser {
   };
 }
 
-/** Token de verificación seguro */
-function newEmailToken(): string {
-  return randomBytes(32).toString("hex");
+/* ===== Helpers ENV/JWT ===== */
+function need(name: string, value?: string) {
+  if (!value) throw new Error(`Missing env: ${name}`);
+  return value;
 }
+const ACCESS_SECRET = need("JWT_ACCESS_SECRET", ENV.JWT_ACCESS_SECRET);
+const REFRESH_SECRET = need("JWT_REFRESH_SECRET", ENV.JWT_REFRESH_SECRET);
+const ACCESS_EXPIRES: SignOptions["expiresIn"] =
+  (ENV.JWT_ACCESS_EXPIRES as SignOptions["expiresIn"]) ?? "15m";
+const REFRESH_EXPIRES: SignOptions["expiresIn"] =
+  (ENV.JWT_REFRESH_EXPIRES as SignOptions["expiresIn"]) ?? "30d";
 
-/* =========================
-   JWT helpers
-   ========================= */
+/** Firma access token */
 function signAccessToken(user: { id: number; role: Role }): string {
   return jwt.sign(
     { sub: user.id, role: user.role },
-    ENV.JWT_ACCESS_SECRET as string,
-    { expiresIn: ENV.JWT_ACCESS_EXPIRES } as SignOptions
+    ACCESS_SECRET,
+    { expiresIn: ACCESS_EXPIRES } as SignOptions
   );
 }
 
+/** Firma refresh token */
 function signRefreshToken(userId: number, jti: string): string {
   return jwt.sign(
     { sub: userId, jti },
-    ENV.JWT_REFRESH_SECRET as string,
-    { expiresIn: ENV.JWT_REFRESH_EXPIRES } as SignOptions
+    REFRESH_SECRET,
+    { expiresIn: REFRESH_EXPIRES } as SignOptions
   );
 }
 
-/* =========================
-   Servicio de Auth
-   ========================= */
+/* ===== Firebase helper ===== */
+async function ensureFirebaseUser(email: string, uid: string) {
+  try {
+    await fbAuth.getUserByEmail(email);
+  } catch {
+    await fbAuth.createUser({ uid, email });
+  }
+}
+
+/* ===== Servicio de Auth ===== */
 export const AuthService = {
-  /** Registro con envío de verificación por correo */
+  /** Registro con verificación vía Firebase */
   async register(input: {
     email: string;
     password: string;
     name?: string;
     role?: Role;
+    accepted?: boolean;
   }) {
-    const { email, password, name, role } = input;
+    const em = input.email.toLowerCase().trim();
 
-    const exists = await prisma.user.findUnique({ where: { email } });
+    const exists = await prisma.user.findUnique({ where: { email: em } });
     if (exists) throw new Error("El email ya está registrado");
 
-    const hash = await bcrypt.hash(password, 10);
+    const hash = await bcrypt.hash(input.password, 10);
 
     const user = await prisma.user.create({
       data: {
-        email,
+        email: em,
         password: hash,
-        role: role ?? Role.CUSTOMER,
-        name: name ?? null,
+        role: input.role ?? Role.CUSTOMER,
+        name: input.name ?? null,
         emailVerified: false,
-        paidVerified: false, // badge solo cuando pague
+        paidVerified: false,
       },
       select: {
         id: true,
@@ -97,16 +111,11 @@ export const AuthService = {
       },
     });
 
-    // crear token de verificación (60 min)
-    const token = newEmailToken();
-    const expires = new Date(Date.now() + 60 * 60 * 1000);
-    await prisma.emailVerificationToken.create({
-      data: { userId: user.id, token, expiresAt: expires },
-    });
+    // Firebase: asegurar usuario y generar link de verificación
+    await ensureFirebaseUser(user.email, String(user.id));
+    const verifyLink = await sendVerificationEmail(user.email); // devuelve el link
 
-    await sendVerificationEmail(user.email);
-
-    // crear registro de refresh token (para revocación por jti si lo necesitas)
+    // JTI para refresh (si usas tabla de revocación)
     const jti = randomBytes(16).toString("hex");
     await prisma.refreshToken.create({ data: { userId: user.id, jti } });
 
@@ -115,16 +124,17 @@ export const AuthService = {
 
     return {
       user: toPublicUser(user),
+      verifyLink, // por ahora muéstralo en el front o logs
       tokens: { accessToken, refreshToken },
     };
   },
 
-  /** Login (bloquea si email no verificado) */
+  /** Login (bloquea si email no verificado; intenta sincronizar con Firebase) */
   async login(input: { email: string; password: string }) {
-    const { email, password } = input;
+    const em = input.email.toLowerCase().trim();
 
-    const user = await prisma.user.findUnique({
-      where: { email },
+    let user = await prisma.user.findUnique({
+      where: { email: em },
       select: {
         id: true,
         email: true,
@@ -139,12 +149,30 @@ export const AuthService = {
     });
     if (!user) throw new Error("Credenciales inválidas");
 
-    // ⛔ Requiere verificación de email antes de permitir login
+    if (!user.emailVerified) {
+      try {
+        const fb = await fbAuth.getUserByEmail(em);
+        if (fb.emailVerified) {
+          user = await prisma.user.update({
+            where: { id: user.id },
+            data: { emailVerified: true, emailVerifiedAt: new Date() },
+            select: {
+              id: true, email: true, role: true, name: true, password: true,
+              emailVerified: true, emailVerifiedAt: true,
+              paidVerified: true, paidVerifiedAt: true,
+            },
+          });
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+
     if (!user.emailVerified) {
       throw new Error("Debes verificar tu correo antes de iniciar sesión.");
     }
 
-    const ok = await bcrypt.compare(password, user.password);
+    const ok = await bcrypt.compare(input.password, user.password!);
     if (!ok) throw new Error("Credenciales inválidas");
 
     const jti = randomBytes(16).toString("hex");
@@ -153,65 +181,59 @@ export const AuthService = {
     const accessToken = signAccessToken({ id: user.id, role: user.role });
     const refreshToken = signRefreshToken(user.id, jti);
 
-    const { password: _omit, ...rest } = user;
-    return { user: toPublicUser(rest), tokens: { accessToken, refreshToken } };
+    const { password: _omit, ...pub } = user;
+    return { user: toPublicUser(pub), tokens: { accessToken, refreshToken } };
   },
 
-  /** Reenviar correo de verificación */
-  async resendVerification(userIdOrEmail: number | string) {
-    const where =
-      typeof userIdOrEmail === "number" ? { id: userIdOrEmail } : { email: userIdOrEmail };
-
+  /** Reenviar verificación (Firebase) */
+  async resendVerification(email: string) {
+    const em = email.toLowerCase().trim();
     const user = await prisma.user.findUnique({
-      where,
+      where: { email: em },
       select: { id: true, email: true, emailVerified: true },
     });
     if (!user) throw new Error("Usuario no encontrado");
-    if (user.emailVerified) return { sent: false, reason: "already-verified" } as const;
+    if (user.emailVerified) return { sent: false as const, reason: "already-verified" as const };
 
-    // invalidar tokens previos
-    await prisma.emailVerificationToken.updateMany({
-      where: { userId: user.id, usedAt: null },
-      data: { usedAt: new Date() },
-    });
-
-    const token = newEmailToken();
-    const expires = new Date(Date.now() + 60 * 60 * 1000);
-    await prisma.emailVerificationToken.create({
-      data: { userId: user.id, token, expiresAt: expires },
-    });
-
-    await sendVerificationEmail(user.email);
-
-    return { sent: true as const };
+    await ensureFirebaseUser(user.email, String(user.id));
+    const verifyLink = await sendVerificationEmail(user.email);
+    return { sent: true as const, verifyLink };
   },
 
-  /** Confirmar verificación desde el enlace del email */
-  async verifyEmail(token: string) {
-    const rec = await prisma.emailVerificationToken.findUnique({
-      where: { token },
-      include: { user: true },
+  /** Reset password (Firebase) – devuelve link por ahora */
+  async forgotPassword(email: string) {
+    const em = email.toLowerCase().trim();
+    const user = await prisma.user.findUnique({
+      where: { email: em },
+      select: { id: true, email: true },
     });
+    if (!user) return { ok: true as const }; // respuesta genérica
 
-    if (!rec || rec.usedAt || rec.expiresAt < new Date()) {
-      throw new Error("Token inválido o expirado");
-    }
+    await ensureFirebaseUser(user.email, String(user.id));
+    const resetLink = await sendPasswordResetEmail(user.email);
+    return { ok: true as const, resetLink };
+  },
 
-    await prisma.$transaction([
-      prisma.user.update({
-        where: { id: rec.userId },
+  /** Sincroniza emailVerified desde Firebase (útil tras abrir el link) */
+  async syncEmailVerified(email: string) {
+    const em = email.toLowerCase().trim();
+    const fb = await fbAuth.getUserByEmail(em);
+    if (fb.emailVerified) {
+      const updated = await prisma.user.update({
+        where: { email: em },
         data: { emailVerified: true, emailVerifiedAt: new Date() },
-      }),
-      prisma.emailVerificationToken.update({
-        where: { id: rec.id },
-        data: { usedAt: new Date() },
-      }),
-    ]);
-
-    return { verified: true as const };
+        select: {
+          id: true, email: true, role: true, name: true,
+          emailVerified: true, emailVerifiedAt: true,
+          paidVerified: true, paidVerifiedAt: true,
+        },
+      });
+      return { ok: true as const, user: toPublicUser(updated) };
+    }
+    return { ok: false as const };
   },
 
-  /** Revocar un refresh token por jti (logout puntual) */
+  /** Logout por jti */
   async logout(jti: string) {
     await prisma.refreshToken.updateMany({
       where: { jti, revokedAt: null },

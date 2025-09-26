@@ -1,7 +1,6 @@
 // src/routes/auth.ts
 import { Router } from "express";
 import bcrypt from "bcryptjs";
-import { randomBytes } from "crypto";
 import { z } from "zod";
 
 import prisma from "../lib/prisma";
@@ -16,7 +15,13 @@ import {
 } from "../lib/rtStore";
 import { validate } from "../lib/validate";
 import { verifyGoogleToken } from "../lib/google";
-import { sendVerificationEmail, sendPasswordResetEmail } from "../lib/mailer";
+
+// Firebase Admin helpers (genera enlaces)
+import { auth as fbAuth } from "../lib/firebase";
+import {
+  sendVerificationEmail,
+  sendPasswordResetEmail,
+} from "../lib/mailer";
 
 const router = Router();
 
@@ -29,7 +34,7 @@ const registerSchema = z.object({
     email: z.string().email(),
     password: z.string().min(8, "Mínimo 8 caracteres"),
     role: z.enum(["CUSTOMER", "SELLER", "PROVIDER"]).optional(),
-    accepted: z.boolean(),
+    accepted: z.boolean(), // acepta TyC/Privacidad
   }),
 });
 
@@ -52,20 +57,23 @@ const forgotSchema = z.object({
   }),
 });
 
-const resetSchema = z.object({
-  body: z.object({
-    token: z.string().min(10),
-    password: z.string().min(8),
-  }),
-});
-
 /* =========================
  *   Helpers
  * ========================= */
 type RefreshPayload = { uid: number; jti: string };
+
 function readJwtPayload<T = any>(jwt: string): T {
   const base64 = jwt.split(".")[1];
   return JSON.parse(Buffer.from(base64, "base64").toString());
+}
+
+// Crea el usuario en Firebase si no existe (usamos el id de Prisma como uid)
+async function ensureFirebaseUser(email: string, uid: string) {
+  try {
+    await fbAuth.getUserByEmail(email);
+  } catch {
+    await fbAuth.createUser({ uid, email });
+  }
 }
 
 /* ========== REGISTER ========== */
@@ -107,17 +115,20 @@ router.post("/register", validate(registerSchema), async (req, res) => {
       include: { business: true },
     });
 
-    // Envío de verificación (Firebase genera y envía/retorna el link según tu mailer)
-    await sendVerificationEmail(user.email);
+    // Asegura usuario en Firebase y genera enlace de verificación (opcional: devolverlo)
+    await ensureFirebaseUser(user.email, String(user.id));
+    const verifyLink = await sendVerificationEmail(user.email);
 
-    // Tokens
+    // Tokens app
     const { accessToken, refreshToken } = issueTokens(user.id);
     const { jti } = readJwtPayload<{ jti: string }>(refreshToken);
     await saveRefreshJti(user.id, jti);
 
     return res.json({
       ok: true,
-      msg: "Usuario registrado. Verifica tu email.",
+      msg: "Usuario registrado. Revisa tu correo para verificar la cuenta.",
+      // opcional para pruebas si no envías email en el cliente:
+      verifyLink,
       accessToken,
       refreshToken,
       user,
@@ -130,11 +141,6 @@ router.post("/register", validate(registerSchema), async (req, res) => {
   }
 });
 
-/* ========== (REMOVIDO) VERIFY EMAIL POR TOKEN PROPIO ==========
-   Si sigues el flujo de Firebase, no necesitas esta ruta.
-   Si en el futuro la necesitas, vuelve a implementarla.
-*/
-
 /* ========== RESEND VERIFICATION ========== */
 router.post("/resend-verification", async (req, res) => {
   try {
@@ -146,9 +152,10 @@ router.post("/resend-verification", async (req, res) => {
     if (user.emailVerified)
       return res.status(400).json({ ok: false, msg: "El correo ya está verificado" });
 
-    await sendVerificationEmail(user.email);
+    await ensureFirebaseUser(user.email, String(user.id));
+    const verifyLink = await sendVerificationEmail(user.email);
 
-    return res.json({ ok: true, msg: "Se envió un nuevo correo de verificación." });
+    return res.json({ ok: true, msg: "Se envió un nuevo correo de verificación.", verifyLink });
   } catch (e: any) {
     return res.status(500).json({ ok: false, msg: e.message });
   }
@@ -166,10 +173,14 @@ router.post("/login", validate(loginSchema), async (req, res) => {
     });
     if (!user) return res.status(400).json({ ok: false, msg: "Credenciales" });
 
-    if (!user.emailVerified)
+    if (!user.emailVerified) {
+      // Si quieres, aquí podrías consultar Firebase y sincronizar flag:
+      // const fb = await fbAuth.getUserByEmail(em);
+      // if (fb.emailVerified) await prisma.user.update({ where:{ id: user.id }, data:{ emailVerified:true, emailVerifiedAt:new Date() }});
       return res
         .status(403)
         .json({ ok: false, msg: "Verifica tu email antes de iniciar sesión" });
+    }
 
     const ok = await bcrypt.compare(password, user.password);
     if (!ok) return res.status(400).json({ ok: false, msg: "Credenciales" });
@@ -266,7 +277,7 @@ router.post("/google", async (req, res) => {
   }
 });
 
-/* ========== FORGOT PASSWORD ========== */
+/* ========== FORGOT PASSWORD (Firebase link) ========== */
 router.post("/forgot-password", validate(forgotSchema), async (req, res) => {
   try {
     const em = (req.body.email as string).toLowerCase().trim();
@@ -275,47 +286,11 @@ router.post("/forgot-password", validate(forgotSchema), async (req, res) => {
     // Respuesta genérica para no filtrar correos
     if (!user) return res.json({ ok: true, msg: "Si el correo existe, enviaremos instrucciones." });
 
-    // Invalida tokens previos (si conservas tu tabla local)
-    await prisma.passwordResetToken.updateMany({
-      where: { userId: user.id, usedAt: null },
-      data: { usedAt: new Date() },
-    });
+    // Asegura usuario en Firebase y genera link de reset (opcional: devolverlo)
+    await ensureFirebaseUser(user.email, String(user.id));
+    const resetLink = await sendPasswordResetEmail(user.email);
 
-    // Puedes mantener este registro (auditoría) aunque uses link de Firebase
-    const token = randomBytes(32).toString("hex");
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 60 min
-
-    await prisma.passwordResetToken.create({
-      data: { userId: user.id, token, expiresAt },
-    });
-
-    // Genera y envía (o devuelve) el enlace de Firebase
-    await sendPasswordResetEmail(user.email);
-
-    return res.json({ ok: true, msg: "Si el correo existe, enviaremos instrucciones." });
-  } catch (e: any) {
-    return res.status(500).json({ ok: false, msg: e.message });
-  }
-});
-
-/* ========== RESET PASSWORD ========== */
-router.post("/reset-password", validate(resetSchema), async (req, res) => {
-  try {
-    const { token, password } = req.body as { token: string; password: string };
-
-    const rec = await prisma.passwordResetToken.findUnique({ where: { token } });
-    if (!rec || rec.usedAt || rec.expiresAt < new Date()) {
-      return res.status(400).json({ ok: false, msg: "Token inválido o expirado" });
-    }
-
-    const hash = await bcrypt.hash(password, 10);
-
-    await prisma.$transaction([
-      prisma.user.update({ where: { id: rec.userId }, data: { password: hash } }),
-      prisma.passwordResetToken.update({ where: { id: rec.id }, data: { usedAt: new Date() } }),
-    ]);
-
-    return res.json({ ok: true, msg: "Contraseña actualizada. Ya puedes iniciar sesión." });
+    return res.json({ ok: true, msg: "Si el correo existe, enviaremos instrucciones.", resetLink });
   } catch (e: any) {
     return res.status(500).json({ ok: false, msg: e.message });
   }
